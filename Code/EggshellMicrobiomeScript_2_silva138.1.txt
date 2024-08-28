@@ -1,0 +1,1953 @@
+##Eggshell Microbiome Analyses in QIIME2##
+##Author(s): Ashleigh F. Marshall##
+##Initiated: March 2022##
+
+###
+
+### SET-UP ###
+
+###
+
+#Need to go to correct directory first (make folder, put FASTQ files in it etc.)
+cd {PATH TO DIRECTORY}
+
+#Activate QIIME2
+conda activate qiime2-2022.8
+
+#Check activated ok
+qiime --help
+
+#Enable tab completion in Bash shell
+source tab-qiime
+
+###
+
+### IMPORT AND TRIM ###
+
+###
+
+#Change to the directory with the sequence data
+cd eggshell-paired-end-sequences
+
+#Import data
+unzip -q 210212_Data.zip <-- only need to do this once
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path 210212_Data \
+  --input-format CasavaOneEightSingleLanePerSampleDirFmt \
+  --output-path demux-paired-end.qza
+
+cd ..
+
+#Visualise summary of data
+qiime demux summarize \
+  --i-data eggshell-paired-end-sequences/demux-paired-end.qza \
+  --o-visualization demux-paired-end.qzv
+
+#Don’t need to demultiplex - already demultiplexed
+#Don't need to remove primers - already removed
+
+###
+
+### DENOISE ###
+
+###
+
+#Denoise (sequence quality control and feature table construction) - DADA2 = same as Damien and Jiménez 2021 for paired end data, seems to be more popular in literature than deblur
+#For qiime data2 denoise use quality score to decide where to truncate - subjective but a good estimate (from YouTube tutorial) is a median above q30
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs eggshell-paired-end-sequences/demux-paired-end.qza \
+  --p-trunc-len-f 240 \
+  --p-trunc-len-r 160 \
+  --o-representative-sequences rep-seqs_240.160.qza \
+  --o-table table_240.160.qza \
+  --o-denoising-stats stats_240.160.qza
+
+qiime feature-table summarize \
+  --i-table table_240.160.qza \
+  --o-visualization table_240.160.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table tabulate-seqs \
+  --i-data rep-seqs_240.160.qza \
+  --o-visualization rep-seqs_240.160.qzv
+
+qiime metadata tabulate \
+  --m-input-file stats_240.160.qza \
+  --o-visualization denoising-stats_240.160.qzv
+
+#Filter to remove non-target-length sequences
+qiime feature-table filter-seqs \
+    --i-data rep-seqs_240.160.qza \
+    --m-metadata-file rep-seqs_240.160.qza \
+    --p-where 'length(sequence) > 249' \
+    --o-filtered-data 250_rep-seqs.qza
+
+qiime feature-table tabulate-seqs \
+  --i-data 250_rep-seqs.qza \
+  --o-visualization 250_rep-seqs.qzv
+
+qiime feature-table filter-seqs \
+    --i-data 250_rep-seqs.qza \
+    --m-metadata-file 250_rep-seqs.qza \
+    --p-where 'length(sequence) < 257' \
+    --o-filtered-data 250.256_rep-seqs.qza
+
+qiime feature-table tabulate-seqs \
+  --i-data 250.256_rep-seqs.qza \
+  --o-visualization 250.256_rep-seqs.qzv
+
+qiime feature-table filter-features \
+  --i-table table_240.160.qza \
+  --m-metadata-file 250.256_rep-seqs.qza \
+  --o-filtered-table 250.256_table.qza
+
+qiime feature-table summarize \
+  --i-table 250.256_table.qza \
+  --o-visualization 250.256_table.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+###
+
+### TAXONOMIC ASSIGNMENT ###
+
+###
+
+#Train classifiers - going to use Silva 138.1 99%.
+
+#Silva 138.1 99% (https://www.melbournebioinformatics.org.au/tutorials/tutorials/qiime2/qiime2/#train-silva-v138-classifier-for-16s18s-rrna-gene-marker-sequences)
+qiime feature-classifier extract-reads \
+  --i-sequences Classifiers/silva-138.1-99-seqs.qza \
+  --p-f-primer GTGCCAGCMGCCGCGGTAA \
+  --p-r-primer GGACTACHVGGGTWTCTAAT \
+  --o-reads silva_138.1_marker_gene.qza
+
+qiime feature-classifier fit-classifier-naive-bayes \
+  --i-reference-reads silva_138.1_marker_gene.qza \
+  --i-reference-taxonomy Classifiers/silva-138.1-99-tax.qza \
+  --o-classifier silva_138.1_marker_gene_classifier.qza
+
+###
+
+#Assigning taxonomy with Silva v138.1
+qiime feature-classifier classify-sklearn \
+  --i-classifier silva_138.1_marker_gene_classifier.qza \
+  --i-reads 250.256_rep-seqs.qza \
+  --o-classification silva_138.1_taxonomy_250.256.qza \
+  --verbose
+
+qiime metadata tabulate \
+  --m-input-file silva_138.1_taxonomy_250.256.qza \
+  --o-visualization silva_138.1_taxonomy_250.256.qzv
+
+###
+
+### FILTERING ###
+
+### Note: only need to make sure tables are filtered, can use the full unfiltered taxonomy and rep-seq files without filtering for downstream analyses
+
+#Filtering out unassigned and non-target taxa = chloroplasts, mitochondria, archaea and eukaryota. Also excluding any features not annotated to at least phylum level
+qiime taxa filter-table \
+  --i-table 250.256_table.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-include p__ \
+  --p-exclude unassigned,mitochondria,chloroplast,archaea,eukaryota \
+  --o-filtered-table 250.256_silva_138.1_table-withphyla-no-unassigned-no-mitochondria-no-chloroplast-no-archaea-no-eukaryota.qza
+
+qiime feature-table summarize \
+  --i-table 250.256_silva_138.1_table-withphyla-no-unassigned-no-mitochondria-no-chloroplast-no-archaea-no-eukaryota.qza \
+  --o-visualization 250.256_silva_138.1_table-withphyla-no-unassigned-no-mitochondria-no-chloroplast-no-archaea-no-eukaryota.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+qiime taxa filter-seqs \
+  --i-sequences 250.256_rep-seqs.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-include p__ \
+  --p-exclude unassigned,mitochondria,chloroplast,archaea,eukaryota \
+  --o-filtered-sequences 250.256_silva_138.1_sequences-withphyla-no-unassigned-no-mitochondria-no-chloroplast-no-archaea-no-eukaryota.qza
+
+### Export to R to run decontam ###
+
+#Import feature table back in = 250-256 nts, all non-target taxa removed, using the silva 138.1 taxonomy
+# Import table
+qiime tools import \
+  --input-path filtered-silva-138.1-table-decontam_0.4.biom \
+  --type 'FeatureTable[Frequency]' \
+  --input-format BIOMV100Format \
+  --output-path filtered-silva-138.1-table-decontam_0.4.qza
+
+# Feature table summary 
+qiime feature-table summarize \
+  --i-table filtered-silva-138.1-table-decontam_0.4.qza \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization filtered-silva-138.1-table-decontam_0.4.qzv
+
+# Use decontaminated feature table to filter rep-seqs and make new taxonomy (to use for visualisations)
+
+qiime feature-table filter-seqs \
+  --i-data 250.256_rep-seqs.qza  \
+  --i-table filtered-silva-138.1-table-decontam_0.4.qza \
+  --o-filtered-data filtered-rep-seqs-decontam.qza
+
+#Assigning taxonomy with Silva v138.1
+qiime feature-classifier classify-sklearn \
+  --i-classifier silva_138.1_marker_gene_classifier.qza \
+  --i-reads filtered-rep-seqs-decontam.qza \
+  --o-classification silva_138.1_taxonomy_250.256-filtered-decontam.qza \
+  --verbose
+
+qiime metadata tabulate \
+  --m-input-file silva_138.1_taxonomy_250.256-filtered-decontam.qza \
+  --o-visualization silva_138.1_taxonomy_250.256-filtered-decontam.qzv
+
+# Filtered taxonomic barplot 
+qiime taxa barplot \
+  --i-table filtered-silva-138.1-table-decontam_0.4.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization filtered-silva-138.1-table-decontam_0.4-barplot.qzv
+
+### Trial if remove sequences appearing in only one sample
+qiime feature-table filter-features \
+  --i-table filtered-silva-138.1-table-decontam_0.4.qza \
+  --p-min-samples 2 \
+  --o-filtered-table filtered-silva-138.1-table-decontam_0.4_no.single.sample.qza
+
+qiime feature-table summarize \
+  --i-table filtered-silva-138.1-table-decontam_0.4_no.single.sample.qza \
+  --o-visualization filtered-silva-138.1-table-decontam_0.4_no.single.sample.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+###
+
+### REMOVE MOCK COMMUNITY AND NEGATIVE CONTROL SAMPLES ###
+
+###
+
+qiime feature-table filter-samples \
+  --i-table filtered-silva-138.1-table-decontam_0.4.qza \
+  --m-metadata-file samples_noMCnoNTC.tsv \
+  --o-filtered-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza
+
+qiime feature-table summarize \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qzv
+
+qiime feature-table filter-seqs \
+  --i-data 250.256_rep-seqs.qza  \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --o-filtered-data filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza
+
+qiime feature-table tabulate-seqs \
+  --i-data filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-visualization filtered-rep-seqs-decontam_0.4_noMCnoNTC.qzv
+
+#Assigning taxonomy with Silva v138.1
+qiime feature-classifier classify-sklearn \
+  --i-classifier silva_138.1_marker_gene_classifier.qza \
+  --i-reads filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-classification silva_138.1_taxonomy_250.256-filtered-decontam_noMCnoNTC.qza \
+  --verbose
+
+qiime metadata tabulate \
+  --m-input-file silva_138.1_taxonomy_250.256-filtered-decontam_noMCnoNTC.qza \
+  --o-visualization silva_138.1_taxonomy_250.256-filtered-decontam_noMCnoNTC.qzv
+
+###
+
+### SUBSET HIHI
+
+###
+
+qiime feature-table filter-samples \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-filtered-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza
+
+qiime feature-table summarize \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qzv
+
+qiime feature-table filter-seqs \
+  --i-data filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --o-filtered-data hihi_filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza
+
+#Remove rows with missing data to avoid problems later
+qiime feature-table filter-samples \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file HihiSamples_MissingSwabTempDataRemoved.tsv \
+  --o-filtered-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingSwabTempDataRemoved.qza
+
+qiime feature-table filter-samples \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file HihiSamples_MissingHatchDataRemoved.tsv \
+  --o-filtered-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza
+
+qiime feature-table filter-samples \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file HihiSamples_MissingLatLongDataRemoved.tsv \
+  --o-filtered-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingLatLongDataRemoved.qza
+
+###
+
+### SUBSET KAKI
+
+###
+
+qiime feature-table filter-samples \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-filtered-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza
+
+qiime feature-table summarize \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-sample-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qzv
+
+qiime feature-table filter-seqs \
+  --i-data filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --o-filtered-data kaki_filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza
+
+#Remove rows with missing data to avoid problems later
+qiime feature-table filter-samples \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file KakiSamples_MissingFemaleDataRemoved.tsv \
+  --o-filtered-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingFemaleDataRemoved.qza
+
+qiime feature-table filter-samples \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file KakiSamples_MissingFreezerDataRemoved.tsv \
+  --o-filtered-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingFreezerDataRemoved.qza
+
+qiime feature-table filter-samples \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file KakiSamples_MissingEggDataRemoved.tsv \
+  --o-filtered-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingEggDataRemoved.qza
+
+###
+
+### SUBSET WILD
+
+qiime feature-table filter-samples \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-filtered-table wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza
+
+qiime feature-table summarize \
+  --i-table wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --m-sample-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qzv
+
+qiime feature-table filter-seqs \
+  --i-data filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --i-table wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --o-filtered-data wild_filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza
+
+###
+
+# Collapse to taxonomic levels
+qiime taxa collapse \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 2 \
+  --o-collapsed-table phylum-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 3 \
+  --o-collapsed-table class-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 4 \
+  --o-collapsed-table order-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 5 \
+  --o-collapsed-table family-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 6 \
+  --o-collapsed-table genus-table-silva-138.1_noMCnoNTC.qza
+
+# To get relative abundances of phyla (https://forum.qiime2.org/t/relative-abundances-of-taxonomy-analysis/4939/6)
+qiime feature-table relative-frequency \
+  --i-table phylum-table-silva-138.1_noMCnoNTC.qza \
+  --o-relative-frequency-table rel-phyla-table-silva-138.1_noMCnoNTC.qza
+
+# Export this
+qiime tools export \
+  --input-path rel-phyla-table-silva-138.1_noMCnoNTC.qza \
+  --output-path rel-phyla-table-silva-138.1_noMCnoNTC
+
+# Automatically renamed feature-table.biom in a directory called rel-phyla-table-silva-138.1_noMCnoNTC
+# Convert the biom file to a tsv
+biom convert -i rel-phyla-table-silva-138.1_noMCnoNTC/feature-table.biom -o rel-phyla-table-silva-138.1_noMCnoNTC/rel-phyla-table_noMCnoNTC.tsv --to-tsv
+
+# Same thing for relative abundances of genera
+qiime feature-table relative-frequency \
+  --i-table genus-table-silva-138.1_noMCnoNTC.qza \
+  --o-relative-frequency-table rel-genus-table-silva-138.1_noMCnoNTC.qza
+
+# Export this
+qiime tools export \
+  --input-path rel-genus-table-silva-138.1_noMCnoNTC.qza \
+  --output-path rel-genus-table-silva-138.1_noMCnoNTC
+
+# Automatically renamed feature-table.biom in a directory called rel-genus-table-silva-138.1_noMCnoNTC
+# Convert the biom file to a tsv
+biom convert -i rel-genus-table-silva-138.1_noMCnoNTC/feature-table.biom -o rel-genus-table-silva-138.1_noMCnoNTC/rel-genus-table_noMCnoNTC.tsv --to-tsv
+
+# Same thing for relative abundances of family
+qiime feature-table relative-frequency \
+  --i-table family-table-silva-138.1_noMCnoNTC.qza \
+  --o-relative-frequency-table rel-family-table-silva-138.1_noMCnoNTC.qza
+
+# Export this
+qiime tools export \
+  --input-path rel-family-table-silva-138.1_noMCnoNTC.qza \
+  --output-path rel-family-table-silva-138.1_noMCnoNTC
+
+# Automatically renamed feature-table.biom in a directory called rel-family-table-silva-138.1_noMCnoNTC
+# Convert the biom file to a tsv
+biom convert -i rel-family-table-silva-138.1_noMCnoNTC/feature-table.biom -o rel-family-table-silva-138.1_noMCnoNTC/rel-family-table_noMCnoNTC.tsv --to-tsv
+
+# Collapse to taxonomic levels
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 2 \
+  --o-collapsed-table hihi_phylum-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 3 \
+  --o-collapsed-table hihi_class-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 4 \
+  --o-collapsed-table hihi_order-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 5 \
+  --o-collapsed-table hihi_family-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 6 \
+  --o-collapsed-table hihi_genus-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 2 \
+  --o-collapsed-table hihi_phylum-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 3 \
+  --o-collapsed-table hihi_class-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 4 \
+  --o-collapsed-table hihi_order-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 5 \
+  --o-collapsed-table hihi_family-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza
+
+qiime taxa collapse \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 6 \
+  --o-collapsed-table hihi_genus-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza
+
+qiime taxa collapse \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 2 \
+  --o-collapsed-table kaki_phylum-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 3 \
+  --o-collapsed-table kaki_class-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 4 \
+  --o-collapsed-table kaki_order-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 5 \
+  --o-collapsed-table kaki_family-table-silva-138.1_noMCnoNTC.qza
+
+qiime taxa collapse \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-taxonomy silva_138.1_taxonomy_250.256.qza \
+  --p-level 6 \
+  --o-collapsed-table kaki_genus-table-silva-138.1_noMCnoNTC.qza
+
+###
+
+### SHARED/UNIQUE FEATURES VENN DIAGRAM
+qiime feature-table core-features \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-fraction 0.001 \
+  --p-max-fraction 1.0 \
+  --o-visualization hihi-core-features-ASV.qzv \
+  --verbose
+
+qiime feature-table core-features \
+  --i-table hihi_genus-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-fraction 0.001 \
+  --p-max-fraction 1.0 \
+  --o-visualization hihi-core-features-genera.qzv \
+  --verbose
+
+qiime feature-table core-features \
+  --i-table hihi_phylum-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-fraction 0.001 \
+  --p-max-fraction 1.0 \
+  --o-visualization hihi-core-features-phyla.qzv \
+  --verbose
+
+qiime feature-table core-features \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-fraction 0.001 \
+  --p-max-fraction 1.0 \
+  --o-visualization kaki-core-features-ASV.qzv \
+  --verbose
+
+qiime feature-table core-features \
+  --i-table kaki_genus-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-fraction 0.001 \
+  --p-max-fraction 1.0 \
+  --o-visualization kaki-core-features-genera.qzv \
+  --verbose
+
+qiime feature-table core-features \
+  --i-table kaki_phylum-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-fraction 0.001 \
+  --p-max-fraction 1.0 \
+  --o-visualization kaki-core-features-phyla.qzv \
+  --verbose
+
+###
+
+### PHYLOGENETIC TREE ###
+
+###
+
+#Build phylogenetic trees
+
+#Phylogenetic Tree - align-to-tree-mafft-fasttree pipeline (as in Moving Pictures Tutorial, Jiménez (2021), and Damien)
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-alignment aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-masked-alignment masked-aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-tree unrooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --o-rooted-tree rooted-tree_allfilter_decontam_noMCnoNTC.qza
+
+## Hihi only
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences hihi_filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-alignment hihi_aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-masked-alignment hihi_masked-aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-tree hihi_unrooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --o-rooted-tree hihi_rooted-tree_allfilter_decontam_noMCnoNTC.qza
+
+## Kaki only
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences kaki_filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-alignment kaki_aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-masked-alignment kaki_masked-aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-tree kaki_unrooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --o-rooted-tree kaki_rooted-tree_allfilter_decontam_noMCnoNTC.qza
+
+## Wild only
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences wild_filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-alignment wild_aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-masked-alignment wild_masked-aligned-filtered-rep-seqs-decontam_0.4_noMCnoNTC.qza \
+  --o-tree wild_unrooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --o-rooted-tree wild_rooted-tree_allfilter_decontam_noMCnoNTC.qza
+
+###
+
+### ALPHA RAREFACTION ###
+
+###
+
+qiime diversity alpha-rarefaction \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-phylogeny rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --p-max-depth 21700 \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization alpha-rarefaction-new.qzv
+
+qiime diversity alpha-rarefaction \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-phylogeny hihi_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --p-max-depth 20000 \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization alpha-rarefaction-hihi-new.qzv
+
+qiime diversity alpha-rarefaction \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --i-phylogeny kaki_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --p-max-depth 25800 \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization alpha-rarefaction-kaki-new.qzv
+
+###
+
+### CORE METRICS ###
+
+### Full dataset
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-sampling-depth 4896 \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-all-wEnvironmentalData
+
+qiime feature-table filter-samples \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-frequency 4896 \
+  --o-filtered-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_4896.qza
+
+qiime diversity alpha \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_4896.qza \
+  --p-metric simpson \
+  --o-alpha-diversity core-metrics-results-all-wEnvironmentalData/simpson_vector.qza
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-all-wEnvironmentalData/simpson_vector.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/simpson_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-all-wEnvironmentalData/faith_pd_vector.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/faith-pd-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-all-wEnvironmentalData/evenness_vector.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/evenness-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-all-wEnvironmentalData/shannon_vector.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/shannon_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-all-wEnvironmentalData/observed_features_vector.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/observed_features_vector-significance.qzv
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/adonis/unweighted_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/adonis/weighted_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/adonis/jaccard_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/adonis/bray_curtis_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/permdisp/unweighted-unifrac-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/permdisp/weighted-unifrac-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/permdisp/jaccard-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-all-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-all-wEnvironmentalData/permdisp/bray_curtis-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+# Export diversity metrics to be used in R
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/faith_pd_vector.qza \
+  --output-path all_exported_diversity_metrics/faith_pd_vector
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/evenness_vector.qza \
+  --output-path all_exported_diversity_metrics/evenness_vector
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/shannon_vector.qza \
+  --output-path all_exported_diversity_metrics/shannon_vector
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/observed_features_vector.qza \
+  --output-path all_exported_diversity_metrics/observed_features_vector
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --output-path all_exported_diversity_metrics/unweighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --output-path all_exported_diversity_metrics/weighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --output-path all_exported_diversity_metrics/jaccard_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-all-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --output-path all_exported_diversity_metrics/bray_curtis_distance_matrix
+
+### Wild only dataset
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny wild_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-sampling-depth 4896 \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-wild-wEnvironmentalData
+
+qiime feature-table filter-samples \
+  --i-table wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-frequency 4896 \
+  --o-filtered-table wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_4896.qza
+
+qiime diversity alpha \
+  --i-table wild_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_4896.qza \
+  --p-metric simpson \
+  --o-alpha-diversity core-metrics-results-wild-wEnvironmentalData/simpson_vector.qza
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-wild-wEnvironmentalData/simpson_vector.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/simpson_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-wild-wEnvironmentalData/faith_pd_vector.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/faith-pd-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-wild-wEnvironmentalData/evenness_vector.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/evenness-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-wild-wEnvironmentalData/shannon_vector.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/shannon_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-wild-wEnvironmentalData/observed_features_vector.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/observed_features_vector-significance.qzv
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/adonis/unweighted_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/adonis/weighted_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/adonis/jaccard_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/adonis/bray_curtis_adonis_species.qzv \
+  --p-formula species
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/permdisp/unweighted-unifrac-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/permdisp/weighted-unifrac-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/permdisp/jaccard-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-wild-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-wild-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization core-metrics-results-wild-wEnvironmentalData/permdisp/bray_curtis-significance-species_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+# Export diversity metrics to be used in R
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/faith_pd_vector.qza \
+  --output-path wild_exported_diversity_metrics/faith_pd_vector
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/evenness_vector.qza \
+  --output-path wild_exported_diversity_metrics/evenness_vector
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/shannon_vector.qza \
+  --output-path wild_exported_diversity_metrics/shannon_vector
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/observed_features_vector.qza \
+  --output-path wild_exported_diversity_metrics/observed_features_vector
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --output-path wild_exported_diversity_metrics/unweighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --output-path wild_exported_diversity_metrics/weighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --output-path wild_exported_diversity_metrics/jaccard_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-wild-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --output-path wild_exported_diversity_metrics/bray_curtis_distance_matrix
+
+###
+
+### Hihi only
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny hihi_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-sampling-depth 4896 \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-hihi-wEnvironmentalData
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny hihi_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingSwabTempDataRemoved.qza \
+  --p-sampling-depth 4896 \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-hihi-wEnvironmentalData_MissingSwabTempDataRemoved
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny hihi_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --p-sampling-depth 4896 \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny hihi_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingLatLongDataRemoved.qza \
+  --p-sampling-depth 4896 \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-hihi-wEnvironmentalData_MissingLatLongDataRemoved
+
+qiime feature-table filter-samples \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-frequency 4896 \
+  --o-filtered-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_4896.qza
+
+qiime diversity alpha \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_4896.qza \
+  --p-metric simpson \
+  --o-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/simpson_vector.qza
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/simpson_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/simpson_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/faith_pd_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/faith-pd-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/evenness_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/evenness-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/shannon_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/shannon_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/observed_features_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/observed_features_vector-significance.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/faith_pd_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/faith_pd_alpha_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/evenness_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/evenness_alpha_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/shannon_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/shannon_vector_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/observed_features_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/observed_features_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-hihi-wEnvironmentalData/simpson_vector.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/simpson_vector_correlation.qzv
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/unweighted_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/weighted_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/jaccard_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/bray_curtis_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/adonis/unweighted_adonis_hatched.unhatched.qzv \
+  --p-formula hatched.unhatched
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/adonis/weighted_adonis_hatched.unhatched.qzv \
+  --p-formula hatched.unhatched
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/adonis/jaccard_adonis_hatched.unhatched.qzv \
+  --p-formula hatched.unhatched
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData_MissingHatchDataRemoved/adonis/bray_curtis_adonis_hatched.unhatched.qzv \
+  --p-formula hatched.unhatched
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permdisp/unweighted-unifrac-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permdisp/weighted-unifrac-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permdisp/jaccard-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permdisp/bray_curtis-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+#Run pairwise permanova using beta-group-signficance to check for differences between different clutches
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permanova/unweighted-unifrac-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permanova/weighted-unifrac-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permanova/jaccard-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/permanova/bray_curtis-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+#Run multivariate adonis with top 5 variables identified as significant in individual models
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/unweighted_adonis_multivariate.qzv \
+  --p-formula "male_age_cohort.sq + mean_rain_laytoswab + male_age_cohort + plate_ID"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/weighted_adonis_multivariate.qzv \
+  --p-formula "female_experienced.naive_social + male_age_cohort.sq + male_total.partners_social + mean_rain_laytoswab"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/jaccard_adonis_multivariate.qzv \
+  --p-formula "mean_rain_laytoswab + male_age_cohort.sq + male_age_cohort + plate_ID"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/adonis/bray_curtis_adonis_multivariate.qzv \
+  --p-formula "max_temp_laytoswab + male_age_cohort.sq + plate_ID + mean_rain_laytoswab"
+
+# Export diversity metrics to be used in R
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/faith_pd_vector.qza \
+  --output-path hihi_exported_diversity_metrics/faith_pd_vector
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/evenness_vector.qza \
+  --output-path hihi_exported_diversity_metrics/evenness_vector
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/shannon_vector.qza \
+  --output-path hihi_exported_diversity_metrics/shannon_vector
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/observed_features_vector.qza \
+  --output-path hihi_exported_diversity_metrics/observed_features_vector
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --output-path hihi_exported_diversity_metrics/unweighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --output-path hihi_exported_diversity_metrics/weighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --output-path hihi_exported_diversity_metrics/jaccard_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-hihi-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --output-path hihi_exported_diversity_metrics/bray_curtis_distance_matrix
+
+# Run bioenv and Mantel tests
+
+qiime diversity bioenv \
+  --i-distance-matrix core-metrics-results-hihi-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2_noMCnoNTC_forbioenv.tsv \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/bioenv-unweighted-unifrac.qzv
+
+qiime metadata distance-matrix \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2_noMCnoNTC.tsv \
+  --m-metadata-column male_total.partners_genetic \
+  --o-distance-matrix core-metrics-results-hihi-wEnvironmentalData/male_total.partners_genetic-distance-matrix.qza
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-hihi-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-hihi-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-unweighted-unifrac.qzv
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-hihi-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-hihi-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-weighted-unifrac.qzv
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-hihi-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-hihi-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-jaccard.qzv
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-hihi-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-hihi-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-hihi-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-bray_curtis.qzv
+
+###
+
+### Kakī only
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny kaki_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-sampling-depth 14396 \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-kaki-wEnvironmentalData
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny kaki_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingFemaleDataRemoved.qza \
+  --p-sampling-depth 14396 \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny kaki_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingFreezerDataRemoved.qza \
+  --p-sampling-depth 14396 \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-kaki-wEnvironmentalData_MissingFreezerDataRemoved
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny kaki_rooted-tree_allfilter_decontam_noMCnoNTC.qza \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingEggDataRemoved.qza \
+  --p-sampling-depth 14396 \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --output-dir core-metrics-results-kaki-wEnvironmentalData_MissingEggDataRemoved
+
+qiime feature-table filter-samples \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-frequency 14396 \
+  --o-filtered-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_14396.qza
+
+qiime diversity alpha \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_14396.qza \
+  --p-metric simpson \
+  --o-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/simpson_vector.qza
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/simpson_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/simpson_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/faith_pd_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/faith-pd-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/evenness_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/evenness-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/shannon_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/shannon_vector-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/observed_features_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/observed_features_vector-significance.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/faith_pd_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/faith_pd_alpha_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/evenness_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/evenness_alpha_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/shannon_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/shannon_vector_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/observed_features_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/observed_features_correlation.qzv
+
+qiime diversity alpha-correlation \
+  --i-alpha-diversity core-metrics-results-kaki-wEnvironmentalData/simpson_vector.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/simpson_vector_correlation.qzv
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/unweighted_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/weighted_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/jaccard_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/bray_curtis_adonis_clutch.hatch.percent.qzv \
+  --p-formula clutch.hatch.percent
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permdisp/unweighted-unifrac-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permdisp/weighted-unifrac-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permdisp/jaccard-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permdisp/bray_curtis-significance-hatched.unhatched_disp.qzv \
+  --p-pairwise \
+  --p-method permdisp
+
+#Run pairwise permanova using beta-group-signficance to check for differences between different females vs. different clutches
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/unweighted-unifrac-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/weighted-unifrac-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/jaccard-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column clutch.nest_id_corrected \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/bray_curtis-significance-clutchID_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column female_combo \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/unweighted-unifrac-significance-female_combo_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column female_combo \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/weighted-unifrac-significance-female_combo_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column female_combo \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/jaccard-significance-female_combo_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_no.slash.tsv \
+  --m-metadata-column female_combo \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/permanova/bray_curtis-significance-female_combo_permanova.qzv \
+  --p-pairwise \
+  --p-method permanova
+
+#Run multivariate adonis with top 5 variables identified as significant in individual models
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/unweighted_adonis_multivariate.qzv \
+  --p-formula "female_combo + nest_location + swab_day_parentalInc + clutch_number"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/weighted_adonis_multivariate.qzv \
+  --p-formula "female_combo + nest_location + swab_day_parentalInc + clutch_number"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/bray_curtis_adonis_multivariate.qzv \
+  --p-formula "female_combo + nest_location + clutch_number + swab_day_parentalInc"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/adonis/jaccard_adonis_multivariate.qzv \
+  --p-formula "female_combo + nest_location + swab_day_parentalInc + clutch_number"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/adonis/unweighted_adonis_wild.captive+female_combo+clutch_number.qzv \
+  --p-formula "wild.captive + female_combo + clutch_number"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/adonis/weighted_adonis_wild.captive+female_combo+clutch_number.qzv \
+  --p-formula "wild.captive + female_combo + clutch_number"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/bray_curtis_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/adonis/bray_curtis_adonis_wild.captive+female_combo+clutch_number.qzv \
+  --p-formula "wild.captive + female_combo + clutch_number"
+
+qiime diversity adonis \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/jaccard_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData_MissingFemaleDataRemoved/adonis/jaccard_adonis_wild.captive+female_combo+clutch_number.qzv \
+  --p-formula "wild.captive + female_combo + clutch_number"
+
+# Export diversity metrics to be used in R
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/faith_pd_vector.qza \
+  --output-path kaki_exported_diversity_metrics/faith_pd_vector
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/evenness_vector.qza \
+  --output-path kaki_exported_diversity_metrics/evenness_vector
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/shannon_vector.qza \
+  --output-path kaki_exported_diversity_metrics/shannon_vector
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/observed_features_vector.qza \
+  --output-path kaki_exported_diversity_metrics/observed_features_vector
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --output-path kaki_exported_diversity_metrics/unweighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --output-path kaki_exported_diversity_metrics/weighted_unifrac_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --output-path kaki_exported_diversity_metrics/jaccard_distance_matrix
+
+qiime tools export \
+  --input-path core-metrics-results-kaki-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --output-path kaki_exported_diversity_metrics/bray_curtis_distance_matrix
+
+# Run bioenv and Mantel tests
+
+qiime diversity bioenv \
+  --i-distance-matrix core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_noMCnoNTC_forbioenv.tsv \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/bioenv-unweighted-unifrac.qzv
+
+qiime metadata distance-matrix \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2_noMCnoNTC.tsv \
+  --m-metadata-column mean_rain_laytoswab \
+  --o-distance-matrix core-metrics-results-kaki-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-kaki-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-kaki-wEnvironmentalData/unweighted_unifrac_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-unweighted_unifrac.qzv
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-kaki-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-kaki-wEnvironmentalData/weighted_unifrac_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-weighted_unifrac.qzv
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-kaki-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-kaki-wEnvironmentalData/jaccard_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-jaccard.qzv
+
+qiime diversity mantel \
+  --i-dm1 core-metrics-results-kaki-wEnvironmentalData/mean_rain_laytoswab-distance-matrix.qza \
+  --i-dm2 core-metrics-results-kaki-wEnvironmentalData/bray_curtis_distance_matrix.qza \
+  --p-intersect-ids \
+  --p-label1 'Mean Rainfall' \
+  --p-label2 'UniFrac distance matrix' \
+  --o-visualization core-metrics-results-kaki-wEnvironmentalData/mantel/diversity-mantel-mean_rain_laytoswab-bray_curtis.qzv
+
+###
+
+### DIFFERENTIAL ABUNDANCE TESTING ###
+
+## ANCOM
+# Need to filter out low abundance/prevalence ASVs to provide better resolution and limit false discovery rate
+
+## All samples
+# Filter out ASVs appearing in less than 20 samples (~10% of 249) and with a total frequency of less than 20 counts across all samples
+qiime feature-table filter-features \
+  --i-table filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table genus-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/genus-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/genus-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/genus-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table family-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/family-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/family-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/family-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table phylum-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/phylum-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/phylum-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/phylum-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/hihi_feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_genus-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_phylum-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_family-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/hihi_family-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_feature-table-DAtesting_2020_MissingHatchDataRemoved.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-visualization DifferentialAbundance/hihi_feature-table-DAtesting_2020_MissingHatchDataRemoved.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_genus-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-visualization DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_MissingHatchDataRemoved.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_phylum-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-visualization DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_MissingHatchDataRemoved.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table hihi_family-table-silva-138.1_noMCnoNTC_MissingHatchDataRemoved.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-visualization DifferentialAbundance/hihi_family-feature-table-DAtesting_2020_MissingHatchDataRemoved.qzv \
+  --m-sample-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table kaki_filtered-silva-138.1-table-decontam_0.4_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/kaki_feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/kaki_feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/kaki_feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table kaki_genus-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table kaki_phylum-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv
+
+qiime feature-table filter-features \
+  --i-table kaki_family-table-silva-138.1_noMCnoNTC.qza \
+  --p-min-frequency 20 \
+  --p-min-samples 20 \
+  --o-filtered-table DifferentialAbundance/kaki_family-feature-table-DAtesting_2020.qza
+
+qiime feature-table summarize \
+  --i-table DifferentialAbundance/kaki_family-feature-table-DAtesting_2020.qza \
+  --o-visualization DifferentialAbundance/kaki_family-feature-table-DAtesting_2020.qzv \
+  --m-sample-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv
+
+# Add pseudocount to remove zeros (which stop ANCOM working) 
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/genus-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/genus-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/family-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/family-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/phylum-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/phylum-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/hihi_feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-composition-table DifferentialAbundance/hihi_feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-composition-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-composition-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020_MissingHatchDataRemoved.qza \
+  --o-composition-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/kaki_feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/kaki_feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020_pseudo.qza
+
+qiime composition add-pseudocount \
+  --i-table DifferentialAbundance/kaki_family-feature-table-DAtesting_2020.qza \
+  --o-composition-table DifferentialAbundance/kaki_family-feature-table-DAtesting_2020_pseudo.qza
+
+# Test for a difference between kaki and hihi samples
+qiime composition ancom \
+  --i-table DifferentialAbundance/feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization DifferentialAbundance/ancom_species_2020.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/genus-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization DifferentialAbundance/ancom_species_2020-genus.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/family-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization DifferentialAbundance/ancom_species_2020-family.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/phylum-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column species \
+  --o-visualization DifferentialAbundance/ancom_species_2020-phylum.qzv
+
+# Test for a difference between experienced and naive hihi females
+qiime composition ancom \
+  --i-table DifferentialAbundance/hihi_feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column female_experienced.naive_social \
+  --o-visualization DifferentialAbundance/ancom_hihi_female_experience_2020.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column female_experienced.naive_social \
+  --o-visualization DifferentialAbundance/ancom_hihi_female_experience_2020-genus.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column female_experienced.naive_social \
+  --o-visualization DifferentialAbundance/ancom_hihi_female_experience_2020-phylum.qzv
+
+# Test for a difference between hatched and unhatched hihi eggs
+qiime composition ancom \
+  --i-table DifferentialAbundance/hihi_feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_hihi_hatched.unhatched_2020_MissingHatchDataRemoved.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/hihi_genus-feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_hihi_hatched.unhatched_2020-genus_MissingHatchDataRemoved.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/hihi_phylum-feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_hihi_hatched.unhatched_2020-phylum_MissingHatchDataRemoved.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/hihi_family-feature-table-DAtesting_2020_pseudo_MissingHatchDataRemoved.qza \
+  --m-metadata-file sample-metadata-hihi-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_hihi_hatched.unhatched_2020-family_MissingHatchDataRemoved.qzv
+
+# Test for a difference between wild-laid and captive-laid kaki egg samples
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column wild.captive \
+  --o-visualization DifferentialAbundance/ancom_kaki_wild.captive_2020.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column wild.captive \
+  --o-visualization DifferentialAbundance/ancom_kaki_wild.captive_2020-genus.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column wild.captive \
+  --o-visualization DifferentialAbundance/ancom_kaki_wild.captive_2020-phylum.qzv
+
+# Test for a difference between experienced and naive kaki males
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column male_experienced.naive_social \
+  --o-visualization DifferentialAbundance/ancom_kaki_male_experience_2020.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column male_experienced.naive_social \
+  --o-visualization DifferentialAbundance/ancom_kaki_male_experience_2020-genus.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column male_experienced.naive_social \
+  --o-visualization DifferentialAbundance/ancom_kaki_male_experience_2020-phylum.qzv
+
+# Test for a difference between wild-laid and captive-laid kaki sire samples
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column male_lay_wild.captive \
+  --o-visualization DifferentialAbundance/ancom_kaki_male_lay_wild.captive_2020.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column male_lay_wild.captive \
+  --o-visualization DifferentialAbundance/ancom_kaki_male_lay_wild.captive_2020-genus.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column male_lay_wild.captive \
+  --o-visualization DifferentialAbundance/ancom_kaki_male_lay_wild.captive_2020-phylum.qzv
+
+# Test for a difference between hatched and unhatched kaki eggs
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_kaki_hatched.unhatched_2020.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_genus-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_kaki_hatched.unhatched_2020-genus.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_phylum-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_kaki_hatched.unhatched_2020-phylum.qzv
+
+qiime composition ancom \
+  --i-table DifferentialAbundance/kaki_family-feature-table-DAtesting_2020_pseudo.qza \
+  --m-metadata-file sample-metadata-kaki-new-noNA-wEnvironmentalData_2.tsv \
+  --m-metadata-column hatched.unhatched \
+  --o-visualization DifferentialAbundance/ancom_kaki_hatched.unhatched_2020-family.qzv
